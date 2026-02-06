@@ -4,15 +4,16 @@
 //! Helps LLMs correctly use alloy library types.
 
 use rmcp::{
-    ErrorData, ServerHandler, ServiceExt,
+    ErrorData, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         Annotated, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
         ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
         ServerInfo,
     },
-    schemars, service::RequestContext,
-    tool, tool_router, RoleServer,
+    schemars,
+    service::RequestContext,
+    tool, tool_router,
 };
 use std::collections::HashMap;
 use tokio::io::{stdin, stdout};
@@ -57,7 +58,9 @@ impl AlloyMcpServer {
         let tx_resource = StaticResource {
             uri: "alloy://consensus/transactions".to_string(),
             name: "Transaction Types".to_string(),
-            description: "Guide to alloy transaction types: TxLegacy, TxEip1559, TxEip4844, TxEnvelope, etc.".to_string(),
+            description:
+                "Guide to alloy transaction types: TxLegacy, TxEip1559, TxEip4844, TxEnvelope, etc."
+                    .to_string(),
             mime_type: "text/markdown".to_string(),
             content: resources::TRANSACTIONS.to_string(),
         };
@@ -66,7 +69,8 @@ impl AlloyMcpServer {
         let block_id_resource = StaticResource {
             uri: "alloy://eips/block-identifiers".to_string(),
             name: "Block Identifier Types".to_string(),
-            description: "Guide to BlockId, BlockNumberOrTag, HashOrNumber, and related types.".to_string(),
+            description: "Guide to BlockId, BlockNumberOrTag, HashOrNumber, and related types."
+                .to_string(),
             mime_type: "text/markdown".to_string(),
             content: resources::BLOCK_IDENTIFIERS.to_string(),
         };
@@ -75,7 +79,9 @@ impl AlloyMcpServer {
         let provider_resource = StaticResource {
             uri: "alloy://provider/setup".to_string(),
             name: "Provider Setup".to_string(),
-            description: "Guide to setting up alloy providers: ProviderBuilder, wallets, WebSocket, layers.".to_string(),
+            description:
+                "Guide to setting up alloy providers: ProviderBuilder, wallets, WebSocket, layers."
+                    .to_string(),
             mime_type: "text/markdown".to_string(),
             content: resources::PROVIDER_SETUP.to_string(),
         };
@@ -220,8 +226,7 @@ impl ServerHandler for AlloyMcpServer {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
