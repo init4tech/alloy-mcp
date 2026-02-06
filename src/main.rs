@@ -4,12 +4,15 @@
 //! Helps LLMs correctly use alloy library types.
 
 use rmcp::{
-    handler::server::wrapper::Json,
+    ErrorData, ServerHandler, ServiceExt,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        resource::{Resource, ResourceContents, ResourceTemplate},
-        GetResourceResult, ListResourceTemplatesResult, ListResourcesResult,
+        Annotated, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
+        ServerInfo,
     },
-    schemars, tool, Error, ServerHandler, ServiceExt,
+    schemars, service::RequestContext,
+    tool, tool_router, RoleServer,
 };
 use std::collections::HashMap;
 use tokio::io::{stdin, stdout};
@@ -22,11 +25,20 @@ mod resources {
     pub const PROVIDER_SETUP: &str = include_str!("../resources/provider/setup.md");
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct LookupTypeRequest {
+    #[schemars(description = "Type name to search for (e.g., 'TxEip1559', 'BlockId', 'Provider')")]
+    type_name: String,
+}
+
 /// The alloy MCP server handler
 #[derive(Clone)]
 struct AlloyMcpServer {
     /// Static resources indexed by URI
     resources: HashMap<String, StaticResource>,
+    /// Tool router for handling tool calls (read by generated macro code)
+    #[allow(dead_code)]
+    tool_router: ToolRouter<Self>,
 }
 
 #[derive(Clone)]
@@ -42,7 +54,6 @@ impl AlloyMcpServer {
     fn new() -> Self {
         let mut resources = HashMap::new();
 
-        // Register consensus/transaction resource
         let tx_resource = StaticResource {
             uri: "alloy://consensus/transactions".to_string(),
             name: "Transaction Types".to_string(),
@@ -52,7 +63,6 @@ impl AlloyMcpServer {
         };
         resources.insert(tx_resource.uri.clone(), tx_resource);
 
-        // Register eips/block-identifiers resource
         let block_id_resource = StaticResource {
             uri: "alloy://eips/block-identifiers".to_string(),
             name: "Block Identifier Types".to_string(),
@@ -62,7 +72,6 @@ impl AlloyMcpServer {
         };
         resources.insert(block_id_resource.uri.clone(), block_id_resource);
 
-        // Register provider/setup resource
         let provider_resource = StaticResource {
             uri: "alloy://provider/setup".to_string(),
             name: "Provider Setup".to_string(),
@@ -72,115 +81,143 @@ impl AlloyMcpServer {
         };
         resources.insert(provider_resource.uri.clone(), provider_resource);
 
-        Self { resources }
+        Self {
+            resources,
+            tool_router: Self::tool_router(),
+        }
     }
 }
 
-#[tool(tool_box)]
+#[tool_router]
 impl AlloyMcpServer {
     /// Look up information about an alloy type by name.
     /// Useful when you know roughly what you're looking for but not the exact path.
     #[tool(description = "Look up alloy type information by name (fuzzy search)")]
     fn lookup_type(
         &self,
-        #[tool(param, description = "Type name to search for (e.g., 'TxEip1559', 'BlockId', 'Provider')")] 
-        type_name: String,
-    ) -> Result<String, Error> {
+        Parameters(LookupTypeRequest { type_name }): Parameters<LookupTypeRequest>,
+    ) -> String {
         let type_lower = type_name.to_lowercase();
-        
-        // Search through resources for mentions of the type
+
         let mut matches = Vec::new();
-        
+
         for resource in self.resources.values() {
             if resource.content.to_lowercase().contains(&type_lower) {
                 matches.push(format!(
                     "Found in: {} ({})\n  → {}\n",
-                    resource.name,
-                    resource.uri,
-                    resource.description
+                    resource.name, resource.uri, resource.description
                 ));
             }
         }
-        
+
         if matches.is_empty() {
-            Ok(format!(
+            format!(
                 "No resources found mentioning '{}'. Try:\n\
                  - alloy://consensus/transactions - for transaction types\n\
                  - alloy://eips/block-identifiers - for block ID types\n\
                  - alloy://provider/setup - for provider setup",
                 type_name
-            ))
+            )
         } else {
-            Ok(format!(
+            format!(
                 "Type '{}' mentioned in:\n\n{}",
                 type_name,
                 matches.join("\n")
-            ))
+            )
         }
     }
 }
 
 impl ServerHandler for AlloyMcpServer {
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        rmcp::model::ServerInfo {
-            name: "alloy-mcp".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            capabilities: ServerCapabilities::builder()
+                .enable_resources()
+                .enable_tools()
+                .build(),
+            instructions: Some(
+                "Provides curated documentation for alloy.rs Ethereum library types.".into(),
+            ),
             ..Default::default()
         }
     }
 
-    async fn list_resources(&self) -> Result<ListResourcesResult, Error> {
-        let resources: Vec<Resource> = self
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListResourcesResult, ErrorData>> + Send + '_ {
+        let resources = self
             .resources
             .values()
-            .map(|r| Resource {
-                uri: r.uri.clone(),
-                name: Some(r.name.clone()),
-                description: Some(r.description.clone()),
-                mime_type: Some(r.mime_type.clone()),
-                ..Default::default()
+            .map(|r| Annotated {
+                raw: rmcp::model::RawResource {
+                    uri: r.uri.clone(),
+                    name: r.name.clone(),
+                    title: None,
+                    description: Some(r.description.clone()),
+                    mime_type: Some(r.mime_type.clone()),
+                    size: None,
+                    icons: None,
+                    meta: None,
+                },
+                annotations: None,
             })
             .collect();
 
-        Ok(ListResourcesResult {
+        std::future::ready(Ok(ListResourcesResult {
             resources,
             ..Default::default()
-        })
+        }))
     }
 
-    async fn get_resource(&self, uri: String) -> Result<GetResourceResult, Error> {
-        let resource = self.resources.get(&uri).ok_or_else(|| {
-            Error::ResourceNotFound(format!("Resource not found: {}", uri))
-        })?;
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ReadResourceResult, ErrorData>> + Send + '_ {
+        let result = match self.resources.get(&request.uri) {
+            Some(resource) => Ok(ReadResourceResult {
+                contents: vec![ResourceContents::TextResourceContents {
+                    uri: resource.uri.clone(),
+                    mime_type: Some(resource.mime_type.clone()),
+                    text: resource.content.clone(),
+                    meta: None,
+                }],
+            }),
+            None => Err(ErrorData::resource_not_found(
+                format!("Resource not found: {}", request.uri),
+                None,
+            )),
+        };
 
-        Ok(GetResourceResult {
-            contents: vec![ResourceContents::Text {
-                uri: resource.uri.clone(),
-                mime_type: Some(resource.mime_type.clone()),
-                text: resource.content.clone(),
-            }],
-        })
+        std::future::ready(result)
     }
 
-    async fn list_resource_templates(&self) -> Result<ListResourceTemplatesResult, Error> {
-        // We could add templates for dynamic lookups later
-        Ok(ListResourceTemplatesResult {
-            resource_templates: vec![
-                ResourceTemplate {
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListResourceTemplatesResult, ErrorData>> + Send + '_ {
+        std::future::ready(Ok(ListResourceTemplatesResult {
+            resource_templates: vec![Annotated {
+                raw: rmcp::model::RawResourceTemplate {
                     uri_template: "alloy://type/{type_name}".to_string(),
-                    name: Some("Type Lookup".to_string()),
+                    name: "Type Lookup".to_string(),
+                    title: None,
                     description: Some("Look up a specific alloy type by name".to_string()),
-                    ..Default::default()
+                    mime_type: None,
+                    icons: None,
                 },
-            ],
+                annotations: None,
+            }],
             ..Default::default()
-        })
+        }))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -191,10 +228,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting alloy-mcp server");
 
-    // Create server and run over stdio
     let server = AlloyMcpServer::new();
     let transport = (stdin(), stdout());
-    
+
     let service = server.serve(transport).await?;
     service.waiting().await?;
 
