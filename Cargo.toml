@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "MCP server providing type context for alloy.rs"
 
+[lib]
+name = "alloy_mcp"
+path = "src/lib.rs"
+
 [dependencies]
 rmcp = { version = "0.14", features = ["server"] }
 tokio = { version = "1", features = ["full"] }
