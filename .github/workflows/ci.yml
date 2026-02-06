@@ -7,5 +7,5 @@ on:
   pull_request:
 
 jobs:
-  rust-base:
-    uses: init4tech/actions/.github/workflows/rust-base.yml@main
+  rust-bin-base:
+    uses: init4tech/actions/.github/workflows/rust-bin-base.yml@main
