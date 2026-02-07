@@ -1,0 +1,11 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust-bin-base:
+    uses: init4tech/actions/.github/workflows/rust-bin-base.yml@main
